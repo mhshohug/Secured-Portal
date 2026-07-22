@@ -1,6 +1,0 @@
-{
-  "name": "Messaging and Calling App",
-  "description": "A WhatsApp-like messaging and calling application with dynamic media rendering, user profiles, live local camera stream previews, and detailed Supabase/Firebase architectural references.",
-  "requestFramePermissions": ["camera", "microphone"],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
