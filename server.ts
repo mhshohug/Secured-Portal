@@ -41,6 +41,8 @@ async function startServer() {
     logger.info("Vite middleware mounted for development.");
   } else {
     const distPath = path.join(process.cwd(), 'dist');
+    logger.info(`Current working directory: ${process.cwd()}`);
+logger.info(`Dist path: ${distPath}`);
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
   res.sendFile(path.join(distPath, 'index.html'));
