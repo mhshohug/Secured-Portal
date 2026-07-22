@@ -4,7 +4,9 @@ import { logger } from '../utils/logger';
 export const mapUserRecord = (row: any): any => {
   if (!row) return null;
   const uid = row.firebase_uid || row.id || row.uid;
-  const name = row.full_name || row.name || row.display_name || '';
+  const name = (row.full_name && row.full_name !== 'Anonymous' && row.full_name !== '') ? row.full_name :
+               (row.name && row.name !== 'Anonymous' && row.name !== '') ? row.name :
+               (row.email ? row.email.split('@')[0] : 'User');
   const phone = row.phone_number || row.phone || row.mobile || '';
   const email = row.email || '';
   const avatar = row.photo_url || row.avatar || row.avatar_url || `https://api.dicebear.com/7.x/adventurer/svg?seed=${uid}`;
@@ -46,7 +48,11 @@ export class UserService {
   }
 
   static async syncUser(userObj: any) {
-    const { uid, fullName, phoneNumber, email, photoURL, bio, statusMessage } = userObj;
+    const { uid, fullName, name: bodyName, phoneNumber, phone, email, photoURL, avatar, bio, statusMessage, status } = userObj;
+    const resolvedName = fullName || bodyName || (email ? email.split('@')[0] : 'User');
+    const resolvedPhone = phoneNumber || phone || null;
+    const resolvedPhoto = photoURL || avatar || `https://api.dicebear.com/7.x/adventurer/svg?seed=${uid}`;
+
     try {
       const existingUser = await this.getUser(uid);
       const nowIso = new Date().toISOString();
@@ -56,12 +62,12 @@ export class UserService {
           is_online: true,
           updated_at: nowIso
         };
-        if (!existingUser.fullName && fullName) mappedUpdate.full_name = fullName;
-        if (!existingUser.phoneNumber && phoneNumber) mappedUpdate.phone_number = phoneNumber;
-        if (!existingUser.email && email) mappedUpdate.email = email;
-        if (!existingUser.photoURL && photoURL) mappedUpdate.photo_url = photoURL;
-        if (!existingUser.bio && bio) mappedUpdate.bio = bio;
-        if (!existingUser.status && statusMessage) mappedUpdate.status_message = statusMessage;
+        if (resolvedName && resolvedName !== 'Anonymous') mappedUpdate.full_name = resolvedName;
+        if (resolvedPhone) mappedUpdate.phone_number = resolvedPhone;
+        if (email) mappedUpdate.email = email;
+        if (resolvedPhoto) mappedUpdate.photo_url = resolvedPhoto;
+        if (bio) mappedUpdate.bio = bio;
+        if (statusMessage || status) mappedUpdate.status_message = statusMessage || status;
 
         const { data, error } = await supabase
           .from('users')
@@ -76,12 +82,12 @@ export class UserService {
       } else {
         const newUserRecord = {
           firebase_uid: uid,
-          full_name: fullName || 'Anonymous',
-          phone_number: phoneNumber || null,
+          full_name: resolvedName,
+          phone_number: resolvedPhone,
           email: email || '',
-          photo_url: photoURL || `https://api.dicebear.com/7.x/adventurer/svg?seed=${uid}`,
+          photo_url: resolvedPhoto,
           bio: bio || 'Hey there! I am using this secure chat.',
-          status_message: statusMessage || 'Available',
+          status_message: statusMessage || status || 'Available',
           is_online: true,
           created_at: nowIso,
           updated_at: nowIso
@@ -106,11 +112,19 @@ export class UserService {
     try {
       const mappedUpdate: any = {};
       if (fields.fullName !== undefined) mappedUpdate.full_name = fields.fullName;
+      else if (fields.name !== undefined) mappedUpdate.full_name = fields.name;
+
       if (fields.phoneNumber !== undefined) mappedUpdate.phone_number = fields.phoneNumber;
+      else if (fields.phone !== undefined) mappedUpdate.phone_number = fields.phone;
+
       if (fields.photoURL !== undefined) mappedUpdate.photo_url = fields.photoURL;
+      else if (fields.avatar !== undefined) mappedUpdate.photo_url = fields.avatar;
+
       if (fields.email !== undefined) mappedUpdate.email = fields.email;
       if (fields.bio !== undefined) mappedUpdate.bio = fields.bio;
       if (fields.statusMessage !== undefined) mappedUpdate.status_message = fields.statusMessage;
+      else if (fields.status !== undefined) mappedUpdate.status_message = fields.status;
+
       mappedUpdate.updated_at = new Date().toISOString();
 
       const { data, error } = await supabase.from('users').update(mappedUpdate).eq('firebase_uid', uid).select();
@@ -135,11 +149,15 @@ export class UserService {
     }
   }
 
-  static async getAllUsers() {
+  static async getAllUsers(currentUid?: string) {
     try {
       const { data, error } = await supabase.from('users').select('*');
       if (!error && data) {
-        return data.map(mapUserRecord);
+        let users = data.map(mapUserRecord);
+        if (currentUid) {
+          users = users.filter((u: any) => u.id !== currentUid && u.uid !== currentUid);
+        }
+        return users;
       }
     } catch (err) {
       logger.error("Error fetching all users:", err);

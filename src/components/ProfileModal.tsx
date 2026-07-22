@@ -125,25 +125,30 @@ export default function ProfileModal({ user, isCurrentUser, onClose, onUpdatePro
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (onUpdateProfile) {
-      onUpdateProfile({
-        name: editedName,
-        email: editedEmail,
-        status: editedStatus,
-        bio: editedBio,
-        phone: editedPhone,
-      });
+      try {
+        await onUpdateProfile({
+          name: editedName,
+          fullName: editedName,
+          email: editedEmail,
+          status: editedStatus,
+          bio: editedBio,
+          phone: editedPhone,
+        });
+      } catch (err) {
+        console.error("Failed to update profile:", err);
+      }
     }
     setIsEditing(false);
   };
 
   return (
     <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in-50 duration-200">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md overflow-hidden shadow-2xl animate-in fade-in-50 duration-200 flex flex-col max-h-[90vh] md:max-h-none">
         
         {/* Header */}
-        <div className="relative h-32 bg-gradient-to-r from-emerald-500/20 to-teal-500/10 p-4 flex items-start justify-between">
+        <div className="relative h-32 bg-gradient-to-r from-emerald-500/20 to-teal-500/10 p-4 flex items-start justify-between shrink-0">
           <span className="text-xs font-semibold bg-emerald-500/20 text-emerald-400 py-1 px-3 rounded-full">
             {isCurrentUser ? 'Your Profile' : 'Contact Info'}
           </span>
@@ -156,8 +161,8 @@ export default function ProfileModal({ user, isCurrentUser, onClose, onUpdatePro
         </div>
 
         {/* Profile Avatar and Basic Info */}
-        <div className="relative px-6 pb-6 pt-0 flex flex-col items-center">
-          <div className="relative -mt-16 mb-4">
+        <div className="relative px-6 pb-6 pt-0 flex flex-col items-center overflow-y-auto flex-1 min-h-0">
+          <div className="relative mt-6 mb-4">
             <div className="relative w-28 h-28">
               {uploadingPhoto ? (
                 <div className="w-28 h-28 rounded-full border-4 border-slate-900 bg-slate-800 flex items-center justify-center shadow-xl">
@@ -296,16 +301,16 @@ export default function ProfileModal({ user, isCurrentUser, onClose, onUpdatePro
                     className="w-full bg-slate-950 border border-slate-800 text-slate-200 text-sm px-3 py-2 rounded-lg focus:outline-none focus:border-emerald-500 transition-colors"
                   />
                 </div>
-                <div className="flex gap-2 pt-2">
+                <div className="sticky bottom-0 left-0 right-0 bg-slate-900 border-t border-slate-800/80 pt-4 pb-4 px-6 -mx-6 mb-[-24px] mt-4 flex gap-2 z-10 shadow-[0_-8px_16px_-6px_rgba(0,0,0,0.8)] pb-[calc(1.2rem+env(safe-area-inset-bottom))] md:relative md:border-t-0 md:shadow-none md:p-0 md:m-0 md:pt-2 md:z-auto">
                   <button
                     onClick={() => setIsEditing(false)}
-                    className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm py-2 rounded-lg font-medium transition-colors cursor-pointer"
+                    className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm py-2.5 rounded-lg font-medium transition-colors cursor-pointer"
                   >
                     Cancel
                   </button>
                   <button
                     onClick={handleSave}
-                    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-slate-50 text-sm py-2 rounded-lg font-medium transition-colors cursor-pointer"
+                    className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-slate-50 text-sm py-2.5 rounded-lg font-medium transition-colors cursor-pointer"
                   >
                     Save Changes
                   </button>

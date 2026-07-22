@@ -19,6 +19,7 @@ import {
 import { auth, database, storage } from '../firebase';
 import { ref as sRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { User } from '../types';
+import { getSupabaseClient } from '../lib/supabase';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -26,6 +27,7 @@ interface AuthContextType {
   loading: boolean;
   error: string | null;
   allUsers: User[];
+  contacts: User[];
   register: (email: string, password: string, name: string, avatar: string, phone: string) => Promise<void>;
   login: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
@@ -43,6 +45,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [allUsers, setAllUsers] = useState<User[]>([]);
+  const [contacts, setContacts] = useState<User[]>([]);
 
   // Map Firebase error codes to user-friendly messages
   const getFriendlyErrorMessage = (code: string) => {
@@ -129,11 +132,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (profileRes.ok) {
           const profileData = await profileRes.json();
           if (profileData.status === 'success' && profileData.user) {
+            console.log('[STATE CHANGE] AuthContext user profile fetched/updated:', profileData.user);
             setCurrentUser(profileData.user);
           }
         }
 
-        // 2. Fetch user directory
+        // 2. Fetch accepted contacts (friends only)
+        const contactsRes = await fetch('/api/contacts', { headers });
+        if (contactsRes.ok) {
+          const contactsData = await contactsRes.json();
+          if (contactsData.status === 'success' && contactsData.users) {
+            console.log('[STATE CHANGE] AuthContext contacts fetched/updated. Friends list count:', contactsData.users.length);
+            setContacts(contactsData.users);
+          }
+        }
+
+        // 3. Fetch user directory (for registration uniqueness validation)
         const usersRes = await fetch('/api/users', { headers });
         if (usersRes.ok) {
           const usersData = await usersRes.json();
@@ -147,9 +161,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     };
 
     fetchProfiles();
-    const interval = setInterval(fetchProfiles, 3000);
 
-    return () => clearInterval(interval);
+    let channel: any = null;
+    let isMounted = true;
+
+    async function subscribeRealtime() {
+      const client = await getSupabaseClient();
+      if (!client || !isMounted) return;
+
+      console.log('[SUPABASE REALTIME] Subscribing to users, friends, friend_requests in AuthContext');
+      channel = client
+        .channel('supabase-auth-sync-all')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'users' },
+          (payload) => {
+            console.log('[SUPABASE REALTIME EVENT] users changed, fetching profiles:', payload);
+            if (isMounted) fetchProfiles();
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'friends' },
+          (payload) => {
+            console.log('[SUPABASE REALTIME EVENT] friends changed, fetching profiles:', payload);
+            if (isMounted) fetchProfiles();
+          }
+        )
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'friend_requests' },
+          (payload) => {
+            console.log('[SUPABASE REALTIME EVENT] friend_requests changed, fetching profiles:', payload);
+            if (isMounted) fetchProfiles();
+          }
+        )
+        .subscribe();
+    }
+
+    subscribeRealtime();
+
+    const interval = setInterval(fetchProfiles, 5000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      if (channel) {
+        console.log('[SUPABASE REALTIME] Unsubscribing from realtime channels in AuthContext');
+        channel.unsubscribe();
+      }
+    };
   }, [firebaseUser]);
 
   // Register user
@@ -369,6 +430,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         loading,
         error,
         allUsers,
+        contacts,
         register,
         login,
         logout,

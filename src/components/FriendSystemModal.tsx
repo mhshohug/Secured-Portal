@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Search, UserPlus, Check, X, Clock, Phone, Mail, UserCheck, Share2, Sparkles, RefreshCw, MessageSquare } from 'lucide-react';
 import { SearchResultUser, FriendRequest, ContactItem, User } from '../types';
 import { getSupabaseClient } from '../lib/supabase';
+import { useAuth } from '../contexts/Auth';
 
 interface FriendSystemModalProps {
   isOpen: boolean;
@@ -19,11 +20,24 @@ export default function FriendSystemModal({
   onSelectUserForChat,
   onOpenUserProfile,
 }: FriendSystemModalProps) {
+  const { firebaseUser } = useAuth();
   const [activeTab, setActiveTab] = useState<'search' | 'requests' | 'contacts'>('search');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResultUser[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
+
+  const getAuthToken = async (): Promise<string> => {
+    try {
+      if (firebaseUser) {
+        const token = await firebaseUser.getIdToken();
+        if (token) return token;
+      }
+    } catch (e) {
+      console.warn("Failed to get Firebase token, using currentUser.id", e);
+    }
+    return currentUser.id;
+  };
 
   // Requests state
   const [incomingRequests, setIncomingRequests] = useState<FriendRequest[]>([]);
@@ -42,29 +56,29 @@ export default function FriendSystemModal({
   };
 
   // Fetch pending requests from Supabase via backend API
-  const fetchRequests = () => {
+  const fetchRequests = async () => {
     setIsLoadingRequests(true);
-    fetch('/api/friends/requests', {
-      headers: {
-        Authorization: `Bearer ${currentUser.id}`,
-      },
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setIsLoadingRequests(false);
-        if (data.status === 'success') {
-          setIncomingRequests(data.incoming || []);
-          setOutgoingRequests(data.outgoing || []);
-        }
-      })
-      .catch((err) => {
-        setIsLoadingRequests(false);
-        console.error('Failed to fetch friend requests:', err);
+    try {
+      const token = await getAuthToken();
+      const res = await fetch('/api/friends/requests', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
       });
+      const data = await res.json();
+      setIsLoadingRequests(false);
+      if (data.status === 'success') {
+        setIncomingRequests(data.incomingRequests || data.incoming || []);
+        setOutgoingRequests(data.outgoingRequests || data.outgoing || []);
+      }
+    } catch (err) {
+      setIsLoadingRequests(false);
+      console.error('Failed to fetch friend requests:', err);
+    }
   };
 
   // Perform user search by Mobile Number, Email, or Full Name from Supabase users
-  const handleSearch = (query: string) => {
+  const handleSearch = async (query: string) => {
     setSearchQuery(query);
     if (!query.trim()) {
       setSearchResults([]);
@@ -72,17 +86,19 @@ export default function FriendSystemModal({
     }
 
     setIsSearching(true);
-    fetch(`/api/friends/search?q=${encodeURIComponent(query)}`, {
-      headers: { Authorization: `Bearer ${currentUser.id}` },
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setIsSearching(false);
-        if (data.status === 'success') {
-          setSearchResults(data.results || []);
-        }
-      })
-      .catch(() => setIsSearching(false));
+    try {
+      const token = await getAuthToken();
+      const res = await fetch(`/api/friends/search?q=${encodeURIComponent(query)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      setIsSearching(false);
+      if (data.status === 'success') {
+        setSearchResults(data.users || data.results || []);
+      }
+    } catch (err) {
+      setIsSearching(false);
+    }
   };
 
   // Automatically load search results on query change or tab open
@@ -144,141 +160,141 @@ export default function FriendSystemModal({
   }, [isOpen, currentUser.id, searchQuery]);
 
   // Send Friend Request
-  const handleSendRequest = (receiverId: string) => {
+  const handleSendRequest = async (receiverId: string) => {
     setLoadingMap((prev) => ({ ...prev, [receiverId]: true }));
 
-    fetch('/api/friends/request', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${currentUser.id}`,
-      },
-      body: JSON.stringify({ receiverId }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setLoadingMap((prev) => ({ ...prev, [receiverId]: false }));
-        if (data.status === 'success') {
-          showToast('Friend request sent!');
-          setSearchResults((prev) =>
-            prev.map((u) =>
-              u.id === receiverId ? { ...u, relationship: 'sent_pending' } : u
-            )
-          );
-          fetchRequests();
-        } else {
-          showToast(data?.error || data?.message || 'Failed to send request');
-        }
-      })
-      .catch(() => {
-        setLoadingMap((prev) => ({ ...prev, [receiverId]: false }));
-        showToast('Failed to send friend request.');
+    try {
+      const token = await getAuthToken();
+      const res = await fetch('/api/friends/request', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ receiverId }),
       });
+      const data = await res.json();
+      setLoadingMap((prev) => ({ ...prev, [receiverId]: false }));
+      if (data.status === 'success') {
+        showToast('Friend request sent!');
+        setSearchResults((prev) =>
+          prev.map((u) =>
+            u.id === receiverId ? { ...u, relationship: 'sent_pending' } : u
+          )
+        );
+        fetchRequests();
+      } else {
+        showToast(data?.error || data?.message || 'Failed to send request');
+      }
+    } catch (err) {
+      setLoadingMap((prev) => ({ ...prev, [receiverId]: false }));
+      showToast('Failed to send friend request.');
+    }
   };
 
   // Accept Friend Request
-  const handleAcceptRequest = (requestId: string, senderId?: string) => {
+  const handleAcceptRequest = async (requestId: string, senderId?: string) => {
     const targetKey = requestId || senderId || '';
     setLoadingMap((prev) => ({ ...prev, [targetKey]: true }));
 
-    fetch('/api/friends/accept', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${currentUser.id}`,
-      },
-      body: JSON.stringify({ requestId, senderId }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
-        if (data.status === 'success') {
-          showToast('Accepted! Added to your friends list.');
-          fetchRequests();
-          if (searchQuery) handleSearch(searchQuery);
-        } else {
-          showToast(data?.error || 'Failed to accept request');
-        }
-      })
-      .catch(() => {
-        setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
-        showToast('Error accepting friend request.');
+    try {
+      const token = await getAuthToken();
+      const res = await fetch('/api/friends/accept', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ requestId, senderId }),
       });
+      const data = await res.json();
+      setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
+      if (data.status === 'success') {
+        showToast('Accepted! Added to your friends list.');
+        fetchRequests();
+        if (searchQuery) handleSearch(searchQuery);
+      } else {
+        showToast(data?.error || 'Failed to accept request');
+      }
+    } catch (err) {
+      setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
+      showToast('Error accepting friend request.');
+    }
   };
 
   // Decline Friend Request
-  const handleDeclineRequest = (requestId: string, senderId?: string) => {
+  const handleDeclineRequest = async (requestId: string, senderId?: string) => {
     const targetKey = requestId || senderId || '';
     setLoadingMap((prev) => ({ ...prev, [targetKey]: true }));
 
-    fetch('/api/friends/decline', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${currentUser.id}`,
-      },
-      body: JSON.stringify({ requestId, senderId }),
-    })
-      .then((res) => res.json())
-      .then(() => {
-        setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
-        showToast('Friend request declined.');
-        fetchRequests();
-        if (searchQuery) handleSearch(searchQuery);
-      })
-      .catch(() => {
-        setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
+    try {
+      const token = await getAuthToken();
+      await fetch('/api/friends/decline', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ requestId, senderId }),
       });
+      setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
+      showToast('Friend request declined.');
+      fetchRequests();
+      if (searchQuery) handleSearch(searchQuery);
+    } catch (err) {
+      setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
+    }
   };
 
   // Cancel Friend Request
-  const handleCancelRequest = (requestId: string, receiverId?: string) => {
+  const handleCancelRequest = async (requestId: string, receiverId?: string) => {
     const targetKey = requestId || receiverId || '';
     setLoadingMap((prev) => ({ ...prev, [targetKey]: true }));
 
-    fetch('/api/friends/cancel', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${currentUser.id}`,
-      },
-      body: JSON.stringify({ requestId, receiverId }),
-    })
-      .then((res) => res.json())
-      .then(() => {
-        setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
-        showToast('Friend request cancelled.');
-        fetchRequests();
-        if (searchQuery) handleSearch(searchQuery);
-      })
-      .catch(() => {
-        setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
+    try {
+      const token = await getAuthToken();
+      await fetch('/api/friends/cancel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ requestId, receiverId }),
       });
+      setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
+      showToast('Friend request cancelled.');
+      fetchRequests();
+      if (searchQuery) handleSearch(searchQuery);
+    } catch (err) {
+      setLoadingMap((prev) => ({ ...prev, [targetKey]: false }));
+    }
   };
 
   // Sync Phone Contacts
-  const handleSyncContacts = (extraContacts?: ContactItem[]) => {
+  const handleSyncContacts = async (extraContacts?: ContactItem[]) => {
     setIsSyncingContacts(true);
 
     const payload = extraContacts || [];
 
-    fetch('/api/friends/sync-contacts', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${currentUser.id}`,
-      },
-      body: JSON.stringify({ contacts: payload }),
-    })
-      .then((res) => res.json())
-      .then((data) => {
-        setIsSyncingContacts(false);
-        if (data.status === 'success') {
-          setContacts(data.contacts || []);
-          showToast('Phone contacts synced successfully!');
-        }
-      })
-      .catch(() => setIsSyncingContacts(false));
+    try {
+      const token = await getAuthToken();
+      const res = await fetch('/api/friends/sync-contacts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ contacts: payload }),
+      });
+      const data = await res.json();
+      setIsSyncingContacts(false);
+      if (data.status === 'success') {
+        setContacts(data.contacts || []);
+        showToast('Phone contacts synced successfully!');
+      }
+    } catch (err) {
+      setIsSyncingContacts(false);
+    }
   };
 
   // Add custom contact phone to sync
@@ -454,7 +470,7 @@ export default function FriendSystemModal({
                         </div>
                       </div>
 
-                      {/* Action Button States for Search Users tab - NEVER show Accept/Decline here */}
+                      {/* Action Button States for Search Users tab - Priority-based */}
                       <div className="shrink-0 flex items-center gap-1.5">
                         {user.id === currentUser.id ? (
                           <span className="text-slate-400 border border-slate-700 bg-slate-800 px-2.5 py-1 rounded-lg text-xs font-semibold">
@@ -475,6 +491,24 @@ export default function FriendSystemModal({
                             >
                               <MessageSquare className="w-3.5 h-3.5" />
                               Chat
+                            </button>
+                          </div>
+                        ) : user.relationship === 'received_pending' ? (
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => handleAcceptRequest(user.requestId || '', user.id)}
+                              disabled={isLoading}
+                              className="bg-emerald-600 hover:bg-emerald-500 text-white px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shadow flex items-center gap-1 cursor-pointer"
+                            >
+                              <Check className="w-3 h-3" />
+                              Accept
+                            </button>
+                            <button
+                              onClick={() => handleDeclineRequest(user.requestId || '', user.id)}
+                              disabled={isLoading}
+                              className="bg-slate-800 hover:bg-rose-900/40 text-slate-300 hover:text-rose-300 px-2.5 py-1.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
+                            >
+                              Decline
                             </button>
                           </div>
                         ) : user.relationship === 'sent_pending' ? (

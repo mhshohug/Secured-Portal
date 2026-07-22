@@ -19,8 +19,30 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: 'stun:stun2.l.google.com:19302' },
     { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:openrelay.metered.ca:80' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelay',
+      credential: 'openrelay'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelay',
+      credential: 'openrelay'
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelay',
+      credential: 'openrelay'
+    },
+    {
+      urls: 'turns:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelay',
+      credential: 'openrelay'
+    }
   ],
   iceCandidatePoolSize: 10,
+  iceTransportPolicy: 'all'
 };
 
 export default function CallingModal({
@@ -53,6 +75,22 @@ export default function CallingModal({
 
   // Derive target partner ID
   const partnerId = partner?.id || callState.partnerId;
+
+  // Attach local stream to video element
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+      localVideoRef.current.play().catch(() => {});
+    }
+  }, [localStream, isVideoOff, permissionError, callState.status]);
+
+  // Attach remote stream to video element
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+      remoteVideoRef.current.play().catch(() => {});
+    }
+  }, [remoteStream, callState.status]);
 
   // Set readable status text
   useEffect(() => {
@@ -155,6 +193,7 @@ export default function CallingModal({
         video: callState.type === 'video' ? { facingMode: facing, width: { ideal: 640 }, height: { ideal: 480 } } : false,
       };
 
+      console.log('Requesting media stream with constraints:', constraints);
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       setLocalStream(stream);
       setPermissionError(null);
@@ -165,7 +204,20 @@ export default function CallingModal({
 
       return stream;
     } catch (err: any) {
-      console.warn('Full media stream failed, trying audio only or canvas fallback:', err);
+      console.warn('Strict media stream constraints failed, trying simpler video/audio constraints:', err);
+      if (callState.type === 'video') {
+        try {
+          const simpleStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+          setLocalStream(simpleStream);
+          setPermissionError(null);
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = simpleStream;
+          }
+          return simpleStream;
+        } catch (simpleErr) {
+          console.warn('Simple video and audio stream failed, falling back to audio only:', simpleErr);
+        }
+      }
       try {
         const audioOnlyStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         setLocalStream(audioOnlyStream);
@@ -242,29 +294,60 @@ export default function CallingModal({
           callId: callState.callId,
           candidate: event.candidate,
           targetId: partnerId,
+          targetUserId: partnerId,
         });
       }
     };
 
-    // Handle Connection State & Auto Reconnect
+    let isRestarting = false;
+    const triggerIceRestart = () => {
+      if (isRestarting) return;
+      isRestarting = true;
+      setTimeout(() => { isRestarting = false; }, 5000); // Throttled to once every 5 seconds
+
+      if (pc.signalingState !== 'closed') {
+        console.log('WebRTC: Initiating ICE Restart');
+        pc.createOffer({ iceRestart: true })
+          .then((offer) => pc.setLocalDescription(offer))
+          .then(() => {
+            if (socket && partnerId) {
+              socket.emit('webrtc_reconnect_request', {
+                callId: callState.callId,
+                targetId: partnerId,
+                targetUserId: partnerId,
+              });
+              socket.emit('webrtc_offer', {
+                callId: callState.callId,
+                sdp: pc.localDescription,
+                offer: pc.localDescription,
+                targetId: partnerId,
+                targetUserId: partnerId,
+              });
+            }
+          })
+          .catch((e) => console.error('ICE restart offer error:', e));
+      }
+    };
+
+    // Handle ICE Connection State changes
+    pc.oniceconnectionstatechange = () => {
+      console.log('WebRTC ICE Connection State:', pc.iceConnectionState);
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        setIsReconnecting(false);
+      } else if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        setIsReconnecting(true);
+        triggerIceRestart();
+      }
+    };
+
+    // Handle general Connection State changes
     pc.onconnectionstatechange = () => {
       console.log('WebRTC Connection State:', pc.connectionState);
       if (pc.connectionState === 'connected') {
         setIsReconnecting(false);
       } else if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
         setIsReconnecting(true);
-        // Attempt ICE restart
-        if (pc.signalingState !== 'closed') {
-          pc.createOffer({ iceRestart: true })
-            .then((offer) => pc.setLocalDescription(offer))
-            .then(() => {
-              if (socket && partnerId) {
-                socket.emit('webrtc_reconnect_request', { callId: callState.callId, targetId: partnerId });
-                socket.emit('webrtc_offer', { callId: callState.callId, sdp: pc.localDescription, targetId: partnerId });
-              }
-            })
-            .catch((e) => console.error('ICE restart offer error:', e));
-        }
+        triggerIceRestart();
       }
     };
 
@@ -276,9 +359,12 @@ export default function CallingModal({
     if (!socket || !partnerId) return;
 
     // Handle WebRTC Offer
-    const handleOffer = async ({ sdp, senderId }: any) => {
+    const handleOffer = async ({ sdp, offer, senderId }: any) => {
       if (senderId !== partnerId) return;
       console.log('WebRTC: Received Offer');
+
+      const incomingSdp = sdp || offer;
+      if (!incomingSdp) return;
 
       let stream = localStream;
       if (!stream) {
@@ -287,7 +373,7 @@ export default function CallingModal({
       if (!stream) return;
 
       const pc = createPeerConnection(stream);
-      await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+      await pc.setRemoteDescription(new RTCSessionDescription(incomingSdp));
 
       // Process queued candidates
       while (iceCandidateQueueRef.current.length > 0) {
@@ -301,17 +387,22 @@ export default function CallingModal({
       socket.emit('webrtc_answer', {
         callId: callState.callId,
         sdp: answer,
+        answer: answer,
         targetId: partnerId,
+        targetUserId: partnerId,
       });
     };
 
     // Handle WebRTC Answer
-    const handleAnswer = async ({ sdp, senderId }: any) => {
+    const handleAnswer = async ({ sdp, answer, senderId }: any) => {
       if (senderId !== partnerId) return;
       console.log('WebRTC: Received Answer');
+      const incomingSdp = sdp || answer;
+      if (!incomingSdp) return;
+
       const pc = peerConnectionRef.current;
       if (pc && pc.signalingState !== 'closed') {
-        await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+        await pc.setRemoteDescription(new RTCSessionDescription(incomingSdp));
 
         // Process queued candidates
         while (iceCandidateQueueRef.current.length > 0) {
@@ -326,7 +417,11 @@ export default function CallingModal({
       if (senderId !== partnerId) return;
       const pc = peerConnectionRef.current;
       if (pc && pc.remoteDescription && pc.remoteDescription.type) {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.error('Error adding remote ICE candidate:', e);
+        }
       } else {
         iceCandidateQueueRef.current.push(candidate);
       }
@@ -373,7 +468,9 @@ export default function CallingModal({
           socket?.emit('webrtc_offer', {
             callId: callState.callId,
             sdp: offer,
+            offer: offer,
             targetId: partnerId,
+            targetUserId: partnerId,
           });
         }
       }
@@ -386,12 +483,12 @@ export default function CallingModal({
     };
   }, [callState.status, callState.isIncoming, callState.callId, partnerId, socket, localStream, initLocalMedia, createPeerConnection]);
 
-  // Initial media capture for pre-connection status (calling / ringing)
+  // Initial media capture for pre-connection status and mount
   useEffect(() => {
-    if (callState.status === 'calling' || callState.status === 'ringing') {
+    if (!localStream && callState.status !== 'idle') {
       initLocalMedia();
     }
-  }, [callState.status, initLocalMedia]);
+  }, [callState.status, initLocalMedia, localStream]);
 
   // Handle Network Disconnect / Online Auto Reconnect
   useEffect(() => {

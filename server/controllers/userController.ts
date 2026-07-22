@@ -45,7 +45,7 @@ export const userController = {
   getAllUsers: async (req: Request, res: Response) => {
     try {
       const decoded = await verifyToken(req);
-      const users = await UserService.getAllUsers();
+      const users = await UserService.getAllUsers(decoded.uid);
       res.json({ status: 'success', users });
     } catch (err: any) {
       res.status(401).json({ error: err.message || "Unauthorized" });

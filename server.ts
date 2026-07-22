@@ -12,7 +12,7 @@ dotenv.config();
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
 
   app.use(express.json());
 
@@ -41,18 +41,16 @@ async function startServer() {
     logger.info("Vite middleware mounted for development.");
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    logger.info(`Current working directory: ${process.cwd()}`);
-logger.info(`Dist path: ${distPath}`);
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
-  res.sendFile(path.join(distPath, 'index.html'));
-});
+    app.get('*all', (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
     logger.info("Static file serving enabled for production.");
   }
-  
-server.listen(PORT, '0.0.0.0', () => {
-  logger.info(`Server running on port ${PORT}`);
-});
+
+  server.listen(PORT, '0.0.0.0', () => {
+    logger.info(`Server running on http://0.0.0.0:${PORT}`);
+  });
 }
 
 startServer().catch((err) => {

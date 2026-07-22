@@ -10,6 +10,7 @@ import { Phone, Sparkles, ShieldAlert, KeyRound } from 'lucide-react';
 import { AuthProvider, useAuth } from './contexts/Auth';
 import AuthScreen from './components/AuthScreen';
 import { io, Socket } from 'socket.io-client';
+import { getSupabaseClient } from './lib/supabase';
 
 const INITIAL_USERS: User[] = [];
 
@@ -26,7 +27,7 @@ export default function App() {
 }
 
 function MainAppContent() {
-  const { currentUser, firebaseUser, loading, allUsers, updateUserProfile } = useAuth();
+  const { currentUser, firebaseUser, loading, contacts, updateUserProfile } = useAuth();
   
   const [activeUserId, setActiveUserId] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
@@ -62,11 +63,11 @@ function MainAppContent() {
 
   // Dynamically map list with active/typing status from socket events
   const displayUsers: User[] = currentUser 
-    ? allUsers
+    ? contacts
        .filter((u) => u.id !== currentUser.id && u.email !== currentUser.email)
        .map((u) => ({
          ...u,
-         isOnline: onlineUsers[u.id] !== undefined ? onlineUsers[u.id] : u.isOnline,
+         isOnline: u.isOnline,
          typingTo: typingUsers[u.id] ? currentUser.id : undefined
        }))
     : [];
@@ -118,48 +119,6 @@ function MainAppContent() {
     socket.on('disconnect', () => {
       console.log('Socket.IO connection dropped.');
       setSocketConnected(false);
-    });
-
-    socket.on('receive_message', (msg: Message) => {
-      // Prevent duplication
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === msg.id)) return prev;
-
-        const currentPartner = activeUserIdRef.current;
-        const isCurrentChat = (msg.senderId === currentUser.id && msg.receiverId === currentPartner) ||
-                             (msg.senderId === currentPartner && msg.receiverId === currentUser.id);
-        if (isCurrentChat) {
-          const updated = [...prev, msg];
-          return updated.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-        }
-        return prev;
-      });
-    });
-
-    socket.on('message_status_update', ({ messageId, status }) => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === messageId ? { ...m, status } : m))
-      );
-    });
-
-    socket.on('message_edited', ({ msgId, newContent, isEdited, editedAt }) => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === msgId ? { ...m, content: newContent, isEdited: true, editedAt } : m))
-      );
-    });
-
-    socket.on('message_deleted', ({ messageId }) => {
-      setMessages((prev) =>
-        prev.map((m) => (m.id === messageId ? { ...m, content: 'This message was deleted', isDeletedForEveryone: true } : m))
-      );
-    });
-
-    socket.on('messages_read', ({ readerId }) => {
-      if (readerId === activeUserIdRef.current) {
-        setMessages((prev) =>
-          prev.map((m) => (m.senderId === currentUser.id ? { ...m, status: 'read' } : m))
-        );
-      }
     });
 
     socket.on('typing_status', ({ senderId, isTyping }) => {
@@ -309,6 +268,125 @@ function MainAppContent() {
     fetchInitialMessages();
   }, [currentUser, activeUserId, firebaseUser]);
 
+  // Subscribe to Supabase Realtime updates on the "messages" table
+  useEffect(() => {
+    if (!currentUser) return;
+
+    let channel: any = null;
+    let isMounted = true;
+
+    async function subscribeMessages() {
+      const client = await getSupabaseClient();
+      if (!client || !isMounted) return;
+
+      console.log('[SUPABASE REALTIME] Subscribing to messages table in App.tsx');
+      channel = client
+        .channel('supabase-messages-sync')
+        .on(
+          'postgres_changes',
+          { event: '*', schema: 'public', table: 'messages' },
+          (payload) => {
+            console.log('[SUPABASE REALTIME MSG EVENT] payload received:', payload);
+            if (!isMounted) return;
+
+            const eventType = payload.eventType;
+            const newRecord = payload.new as any;
+            const oldRecord = payload.old as any;
+
+            if (eventType === 'INSERT') {
+              // Exclude message if we have deleted it for ourselves
+              const deletedFor = Array.isArray(newRecord.deleted_for) ? newRecord.deleted_for : [];
+              if (deletedFor.includes(currentUser.id)) return;
+
+              // Convert database row back to frontend Message object
+              const msg: Message = {
+                id: newRecord.id,
+                senderId: newRecord.sender_id,
+                receiverId: newRecord.receiver_id,
+                content: newRecord.content,
+                type: (newRecord.type || 'text') as MessageType,
+                timestamp: newRecord.timestamp,
+                status: newRecord.status || 'sent',
+                mediaUrl: newRecord.media_url || '',
+                fileName: newRecord.file_name || '',
+                fileSize: newRecord.file_size || '',
+                duration: newRecord.duration || '',
+                replyTo: (newRecord.reply_to_id || newRecord.reply_to_content) ? {
+                  id: newRecord.reply_to_id || '',
+                  content: newRecord.reply_to_content || '',
+                  senderName: newRecord.reply_to_sender_name || '',
+                  type: (newRecord.reply_to_type || 'text') as MessageType
+                } : undefined,
+                isEdited: newRecord.is_edited || false,
+                editedAt: newRecord.edited_at || undefined,
+                deletedFor: deletedFor,
+                isDeletedForEveryone: newRecord.is_deleted_for_everyone || false
+              };
+
+              const currentPartner = activeUserIdRef.current;
+              const isCurrentChat = (msg.senderId === currentUser.id && msg.receiverId === currentPartner) ||
+                                   (msg.senderId === currentPartner && msg.receiverId === currentUser.id);
+
+              if (isCurrentChat) {
+                setMessages((prev) => {
+                  if (prev.some((m) => m.id === msg.id)) return prev;
+                  const updated = [...prev, msg];
+                  return updated.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+                });
+
+                // If we are the receiver of this new message, mark it as read in the database
+                if (msg.receiverId === currentUser.id && msg.status !== 'read') {
+                  client
+                    .from('messages')
+                    .update({ status: 'read' })
+                    .eq('id', msg.id)
+                    .then();
+                }
+              }
+            } else if (eventType === 'UPDATE') {
+              const deletedFor = Array.isArray(newRecord.deleted_for) ? newRecord.deleted_for : [];
+              if (deletedFor.includes(currentUser.id)) {
+                // If the user deleted this message for themselves, filter it out from state
+                setMessages((prev) => prev.filter((m) => m.id !== newRecord.id));
+                return;
+              }
+
+              setMessages((prev) =>
+                prev.map((m) => {
+                  if (m.id === newRecord.id) {
+                    return {
+                      ...m,
+                      content: newRecord.is_deleted_for_everyone ? 'This message was deleted' : newRecord.content,
+                      status: newRecord.status || m.status,
+                      isEdited: newRecord.is_edited || m.isEdited,
+                      editedAt: newRecord.edited_at || m.editedAt,
+                      isDeletedForEveryone: newRecord.is_deleted_for_everyone || m.isDeletedForEveryone,
+                      deletedFor: deletedFor
+                    };
+                  }
+                  return m;
+                })
+              );
+            } else if (eventType === 'DELETE') {
+              setMessages((prev) => prev.filter((m) => m.id !== oldRecord.id));
+            }
+          }
+        )
+        .subscribe((status) => {
+          console.log('[SUPABASE REALTIME MSG SUB] Subscription status:', status);
+        });
+    }
+
+    subscribeMessages();
+
+    return () => {
+      isMounted = false;
+      if (channel) {
+        channel.unsubscribe();
+      }
+    };
+  }, [currentUser, activeUserId]);
+
   // Handle local call duration ticking and synchronization
   useEffect(() => {
     let timerInterval: NodeJS.Timeout | null = null;
@@ -408,51 +486,91 @@ function MainAppContent() {
       return [...prev, newMessage];
     });
 
-    if (socketRef.current && socketConnected) {
-      socketRef.current.emit('send_message', newMessage, (response: any) => {
-        if (response && response.status === 'success') {
+    const client = await getSupabaseClient();
+    if (client) {
+      const messageRecord = {
+        id: messageId,
+        sender_id: currentUser.id,
+        receiver_id: activeUserId,
+        content: content || '',
+        type: type || 'text',
+        timestamp: timestamp,
+        status: 'sent',
+        media_url: mediaUrl || null,
+        duration: duration || null
+      };
+
+      try {
+        const { error } = await client.from('messages').insert(messageRecord);
+        if (error) {
+          console.error("Supabase insert error:", error);
+        } else {
           setMessages((prev) =>
             prev.map((m) => (m.id === messageId ? { ...m, status: 'sent' } : m))
           );
-        } else {
-          console.warn('Socket send failed, queuing message:', messageId);
-          messageQueueRef.current.push(newMessage);
         }
-      });
-    } else {
-      console.log('Socket disconnected, queuing message:', messageId);
-      messageQueueRef.current.push(newMessage);
+      } catch (err) {
+        console.error("Failed to insert message:", err);
+      }
     }
   };
 
-  const handleEditMessage = (messageId: string, newContent: string) => {
+  const handleEditMessage = async (messageId: string, newContent: string) => {
     setMessages((prev) =>
       prev.map((m) => (m.id === messageId ? { ...m, content: newContent, isEdited: true } : m))
     );
-    if (socketRef.current && socketConnected) {
-      socketRef.current.emit('edit_message', { messageId, newContent, receiverId: activeUserId });
+    const client = await getSupabaseClient();
+    if (client) {
+      try {
+        await client
+          .from('messages')
+          .update({
+            content: newContent
+          })
+          .eq('id', messageId);
+      } catch (err) {
+        console.error("Failed to edit message in Supabase:", err);
+      }
     }
   };
 
-  const handleDeleteForMe = (messageId: string) => {
+  const handleDeleteForMe = async (messageId: string) => {
     setMessages((prev) => prev.filter((m) => m.id !== messageId));
-    if (socketRef.current && socketConnected) {
-      socketRef.current.emit('delete_message_for_me', { messageId });
-    }
+    // Kept local to prevent DB schema conflicts
   };
 
-  const handleDeleteForEveryone = (messageId: string) => {
+  const handleDeleteForEveryone = async (messageId: string) => {
     setMessages((prev) =>
       prev.map((m) => (m.id === messageId ? { ...m, content: 'This message was deleted', isDeletedForEveryone: true } : m))
     );
-    if (socketRef.current && socketConnected) {
-      socketRef.current.emit('delete_message_for_everyone', { messageId, receiverId: activeUserId });
+    const client = await getSupabaseClient();
+    if (client) {
+      try {
+        await client
+          .from('messages')
+          .update({
+            content: 'This message was deleted'
+          })
+          .eq('id', messageId);
+      } catch (err) {
+        console.error("Failed to delete message for everyone in Supabase:", err);
+      }
     }
   };
 
-  const handleMarkRead = (partnerId: string) => {
-    if (socketRef.current && socketConnected && partnerId) {
-      socketRef.current.emit('mark_messages_read', { partnerId });
+  const handleMarkRead = async (partnerId: string) => {
+    const client = await getSupabaseClient();
+    if (client && partnerId) {
+      try {
+        await client
+          .from('messages')
+          .update({ status: 'read' })
+          .eq('sender_id', partnerId)
+          .eq('receiver_id', currentUser.id)
+          .neq('status', 'read');
+      } catch (err) {
+        console.error("Failed to mark messages as read in Supabase:", err);
+      }
     }
   };
 
@@ -493,7 +611,11 @@ function MainAppContent() {
     }));
 
     if (socketRef.current && socketConnected) {
-      socketRef.current.emit('accept_call', { callId: callState.callId, partnerId: callState.partnerId });
+      socketRef.current.emit('accept_call', { 
+        callId: callState.callId, 
+        partnerId: callState.partnerId,
+        receiverId: callState.partnerId 
+      });
     }
   };
 
@@ -508,7 +630,11 @@ function MainAppContent() {
     }));
 
     if (socketRef.current && socketConnected) {
-      socketRef.current.emit('decline_call', { callId: callState.callId, partnerId: targetPartnerId });
+      socketRef.current.emit('reject_call', { 
+        callId: callState.callId, 
+        partnerId: targetPartnerId,
+        receiverId: targetPartnerId 
+      });
     }
 
     setTimeout(() => {
@@ -599,10 +725,10 @@ function MainAppContent() {
       )}
 
       {/* Calling Stream Modal */}
-      {callState.status !== 'idle' && activePartner && (
+      {callState.status !== 'idle' && (displayUsers.find((u) => u.id === callState.partnerId) || activePartner) && (
         <CallingModal
           callState={callState}
-          partner={displayUsers.find((u) => u.id === callState.partnerId) || activePartner}
+          partner={displayUsers.find((u) => u.id === callState.partnerId) || activePartner!}
           currentUser={currentUser}
           socket={socketRef.current}
           onAccept={handleAcceptIncomingCall}

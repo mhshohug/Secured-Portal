@@ -111,32 +111,6 @@ export function setupSocketHandlers(io: Server) {
       io.to(senderId).emit('messages_read', { readerId: receiverId });
     });
 
-    // Friend Requests Realtime
-    socket.on('send_friend_request', async ({ receiverId }, callback) => {
-      const senderId = socketUserMap.get(socket.id);
-      if (!senderId || !receiverId) return;
-      try {
-        const result = await FriendService.sendFriendRequest(senderId, receiverId);
-        io.to(receiverId).emit('friend_request_received', (result as any).request);
-        if (callback) callback(result);
-      } catch (err: any) {
-        if (callback) callback({ status: 'error', error: err.message });
-      }
-    });
-
-    socket.on('accept_friend_request', async ({ requestId, senderId }, callback) => {
-      const currentUid = socketUserMap.get(socket.id);
-      if (!currentUid) return;
-      try {
-        const result = await FriendService.acceptFriendRequest(currentUid, requestId || senderId);
-        if (result.senderId) io.to(result.senderId).emit('friend_request_accepted', result);
-        if (result.receiverId) io.to(result.receiverId).emit('friend_request_accepted', result);
-        if (callback) callback(result);
-      } catch (err: any) {
-        if (callback) callback({ status: 'error', error: err.message });
-      }
-    });
-
     // WebRTC Calling & Signaling
     socket.on('initiate_call', async (callData) => {
       const callerId = socketUserMap.get(socket.id) || callData.callerId;
@@ -178,12 +152,20 @@ export function setupSocketHandlers(io: Server) {
       if (receiverId) {
         io.to(receiverId).emit('call_status_update', { callId, status: 'connected' });
       }
+      const acceptingUserId = socketUserMap.get(socket.id);
+      if (acceptingUserId) {
+        io.to(acceptingUserId).emit('call_status_update', { callId, status: 'connected' });
+      }
     });
 
     socket.on('reject_call', ({ callId, receiverId }) => {
       CallService.updateCall(callId, 'ended');
       if (receiverId) {
         io.to(receiverId).emit('call_status_update', { callId, status: 'ended' });
+      }
+      const decliningUserId = socketUserMap.get(socket.id);
+      if (decliningUserId) {
+        io.to(decliningUserId).emit('call_status_update', { callId, status: 'ended' });
       }
     });
 
@@ -196,16 +178,48 @@ export function setupSocketHandlers(io: Server) {
     });
 
     // WebRTC P2P Signaling Relays
-    socket.on('webrtc_offer', ({ targetUserId, offer }) => {
-      io.to(targetUserId).emit('webrtc_offer', { senderId: socketUserMap.get(socket.id), offer });
+    socket.on('webrtc_offer', (data: any) => {
+      const target = data?.targetUserId || data?.targetId;
+      if (target) {
+        io.to(target).emit('webrtc_offer', {
+          ...data,
+          senderId: socketUserMap.get(socket.id),
+          sdp: data?.sdp || data?.offer,
+          offer: data?.offer || data?.sdp
+        });
+      }
     });
 
-    socket.on('webrtc_answer', ({ targetUserId, answer }) => {
-      io.to(targetUserId).emit('webrtc_answer', { senderId: socketUserMap.get(socket.id), answer });
+    socket.on('webrtc_answer', (data: any) => {
+      const target = data?.targetUserId || data?.targetId;
+      if (target) {
+        io.to(target).emit('webrtc_answer', {
+          ...data,
+          senderId: socketUserMap.get(socket.id),
+          sdp: data?.sdp || data?.answer,
+          answer: data?.answer || data?.sdp
+        });
+      }
     });
 
-    socket.on('webrtc_ice_candidate', ({ targetUserId, candidate }) => {
-      io.to(targetUserId).emit('webrtc_ice_candidate', { senderId: socketUserMap.get(socket.id), candidate });
+    socket.on('webrtc_ice_candidate', (data: any) => {
+      const target = data?.targetUserId || data?.targetId;
+      if (target) {
+        io.to(target).emit('webrtc_ice_candidate', {
+          ...data,
+          senderId: socketUserMap.get(socket.id)
+        });
+      }
+    });
+
+    socket.on('webrtc_reconnect_request', (data: any) => {
+      const target = data?.targetUserId || data?.targetId;
+      if (target) {
+        io.to(target).emit('webrtc_reconnect_request', {
+          ...data,
+          senderId: socketUserMap.get(socket.id)
+        });
+      }
     });
 
     // Disconnect
