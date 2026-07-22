@@ -16,5 +16,6 @@
       "sizes": "512x512",
       "type": "image/jpeg"
     }
-  ]
+  ],
+  "description": "JSMessenger is a secure real-time messaging app with text chat, voice calls, video calls, media sharing, and end-to-end encrypted communication."
 }
