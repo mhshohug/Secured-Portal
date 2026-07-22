@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+html, body, #root {
+  width: 100%;
+  max-width: 100%;
+  min-height: 100dvh;
+  height: auto;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  background-color: #020617;
+  color: #f8fafc;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+@supports (min-height: 100dvh) {
+  html, body, #root {
+    min-height: 100dvh;
+  }
+}
+
